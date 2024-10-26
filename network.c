@@ -1,30 +1,35 @@
+#include "network.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-#include <sys/select.h>
 #include <errno.h>
+#include <sys/select.h>
 
-#define PORT 8080
-#define BUFFER_SIZE 1024
-#define MAX_CLIENTS 4
+// Global variables for client and server
+static int server_socket;
+static int client_sockets[MAX_CLIENTS] = {0};
+static int sock = 0;
+static pthread_t recv_thread;
+static int running = 1;
 
-int main()
+// Server Functions
+
+int start_server()
 {
-    int server_socket, client_socket, max_sd, sd, activity;
-    int client_sockets[MAX_CLIENTS] = {0};
     struct sockaddr_in server_addr, client_addr;
     socklen_t client_addr_len = sizeof(client_addr);
+    int client_socket, max_sd, sd, activity;
     char buffer[BUFFER_SIZE];
     fd_set readfds;
 
-    // Create socket
+    // Create server socket
     server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (server_socket == -1)
     {
         perror("Socket creation failed");
-        exit(EXIT_FAILURE);
+        return -1;
     }
 
     // Set up the server address structure
@@ -37,7 +42,7 @@ int main()
     {
         perror("Bind failed");
         close(server_socket);
-        exit(EXIT_FAILURE);
+        return -1;
     }
 
     // Listen for incoming connections
@@ -45,14 +50,13 @@ int main()
     {
         perror("Listen failed");
         close(server_socket);
-        exit(EXIT_FAILURE);
+        return -1;
     }
 
     printf("Server listening on port %d\n", PORT);
 
     while (1)
     {
-        // Clear the socket set and add the server socket
         FD_ZERO(&readfds);
         FD_SET(server_socket, &readfds);
         max_sd = server_socket;
@@ -74,14 +78,16 @@ int main()
             perror("select error");
         }
 
-        // If something happened on the server socket, it’s an incoming connection
+        // Incoming connection
         if (FD_ISSET(server_socket, &readfds))
         {
-            if ((client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &client_addr_len)) < 0)
+            client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &client_addr_len);
+            if (client_socket < 0)
             {
                 perror("accept");
-                exit(EXIT_FAILURE);
+                return -1;
             }
+
             printf("New connection, socket fd is %d\n", client_socket);
 
             // Add new socket to array of sockets
@@ -95,7 +101,7 @@ int main()
             }
         }
 
-        // Check each client socket for incoming messages
+        // Handle messages from clients
         for (int i = 0; i < MAX_CLIENTS; i++)
         {
             sd = client_sockets[i];
@@ -104,43 +110,99 @@ int main()
                 int bytes_read = read(sd, buffer, sizeof(buffer) - 1);
                 if (bytes_read == 0)
                 {
-                    // Client disconnected
                     close(sd);
                     client_sockets[i] = 0;
                     printf("Client disconnected\n");
                 }
                 else
                 {
-                    int tempClientSock;
-                    // Null-terminate the received message
                     buffer[bytes_read] = '\0';
                     printf("Received message: %s\n", buffer);
 
-                    // Broadcast the message to all other clients
-                    // for (int j = 0; j < MAX_CLIENTS; j++)
-                    // {
-                    //     if (client_sockets[j] > 0 && client_sockets[j] != sd)
-                    //     {
-                    //         write(client_sockets[j], buffer, bytes_read);
-                    //     }
-                    // }
-
-                    // code to broadcast to individual client
-
-                    for (int j = 0; j < MAX_CLIENTS; i++)
+                    // Broadcast message to all other clients
+                    for (int j = 0; j < MAX_CLIENTS; j++)
                     {
-                        if (j + 1 == buffer[0])
+                        if (client_sockets[j] > 0 && client_sockets[j] != sd)
                         {
                             write(client_sockets[j], buffer, bytes_read);
                         }
                     }
-
-                    write(tempClientSock, buffer, bytes_read);
                 }
             }
         }
     }
 
-    close(server_socket);
     return 0;
+}
+
+void stop_server()
+{
+    close(server_socket);
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+        if (client_sockets[i] > 0)
+        {
+            close(client_sockets[i]);
+        }
+    }
+}
+
+// Client Functions
+
+// Thread function to receive messages
+void *receive_messages(void *arg)
+{
+    char buffer[BUFFER_SIZE];
+    int bytes_read;
+
+    while (running && (bytes_read = read(sock, buffer, sizeof(buffer) - 1)) > 0)
+    {
+        buffer[bytes_read] = '\0';
+        printf("Message from server: %s\n", buffer);
+    }
+    return NULL;
+}
+
+int start_client(const char *server_ip)
+{
+    struct sockaddr_in server_addr;
+
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0)
+    {
+        perror("Socket creation error");
+        return -1;
+    }
+
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(PORT);
+
+    if (inet_pton(AF_INET, server_ip, &server_addr.sin_addr) <= 0)
+    {
+        perror("Invalid address");
+        return -1;
+    }
+
+    if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
+    {
+        perror("Connection failed");
+        return -1;
+    }
+
+    running = 1;
+    pthread_create(&recv_thread, NULL, receive_messages, NULL);
+    return 0;
+}
+
+void send_message(const char *message)
+{
+    send(sock, message, strlen(message), 0);
+}
+
+void stop_client()
+{
+    running = 0;
+    pthread_cancel(recv_thread);
+    pthread_join(recv_thread, NULL);
+    close(sock);
 }
