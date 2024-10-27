@@ -15,5 +15,8 @@ void stop_server();
 int start_client(const char *server_ip);
 void send_message(const char *message);
 void stop_client();
+char* receive_message(); // New function for receiving messages
+
+extern char message_buffer[BUFFER_SIZE]; // Expose buffer for display
 
 #endif // NETWORK_H

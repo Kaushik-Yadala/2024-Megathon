@@ -23,10 +23,11 @@ int main()
     }
     else if (choice == 1)
     {
-        start_client("127.0.0.1");
+        int playerNumber = start_client("127.0.0.1");
         while (1)
         {
             char message[100];
+            printf("Player number: %d", playerNumber);
             scanf("%s", message);
             send_message(message);
         }

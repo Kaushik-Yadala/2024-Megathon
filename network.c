@@ -5,17 +5,17 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <pthread.h>
 #include <sys/select.h>
 
-// Global variables for client and server
 static int server_socket;
 static int client_sockets[MAX_CLIENTS] = {0};
 static int sock = 0;
+static int playerId = -1; // For client use
 static pthread_t recv_thread;
 static int running = 1;
 
-// Server Functions
-
+// Server Function to Start and Manage Connections
 int start_server()
 {
     struct sockaddr_in server_addr, client_addr;
@@ -24,7 +24,6 @@ int start_server()
     char buffer[BUFFER_SIZE];
     fd_set readfds;
 
-    // Create server socket
     server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (server_socket == -1)
     {
@@ -32,12 +31,10 @@ int start_server()
         return -1;
     }
 
-    // Set up the server address structure
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(PORT);
 
-    // Bind the socket
     if (bind(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
     {
         perror("Bind failed");
@@ -45,8 +42,7 @@ int start_server()
         return -1;
     }
 
-    // Listen for incoming connections
-    if (listen(server_socket, 3) < 0)
+    if (listen(server_socket, MAX_CLIENTS) < 0)
     {
         perror("Listen failed");
         close(server_socket);
@@ -61,7 +57,6 @@ int start_server()
         FD_SET(server_socket, &readfds);
         max_sd = server_socket;
 
-        // Add child sockets to set
         for (int i = 0; i < MAX_CLIENTS; i++)
         {
             sd = client_sockets[i];
@@ -71,14 +66,12 @@ int start_server()
                 max_sd = sd;
         }
 
-        // Wait for activity on any socket
         activity = select(max_sd + 1, &readfds, NULL, NULL, NULL);
         if ((activity < 0) && (errno != EINTR))
         {
             perror("select error");
         }
 
-        // Incoming connection
         if (FD_ISSET(server_socket, &readfds))
         {
             client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &client_addr_len);
@@ -90,18 +83,22 @@ int start_server()
 
             printf("New connection, socket fd is %d\n", client_socket);
 
-            // Add new socket to array of sockets
             for (int i = 0; i < MAX_CLIENTS; i++)
             {
                 if (client_sockets[i] == 0)
                 {
                     client_sockets[i] = client_socket;
+
+                    // Send player ID (index) to client
+                    char player_id_msg[BUFFER_SIZE];
+                    snprintf(player_id_msg, sizeof(player_id_msg), "PLAYER_ID|%d", i);
+                    write(client_socket, player_id_msg, strlen(player_id_msg));
+
                     break;
                 }
             }
         }
 
-        // Handle messages from clients
         for (int i = 0; i < MAX_CLIENTS; i++)
         {
             sd = client_sockets[i];
@@ -117,9 +114,9 @@ int start_server()
                 else
                 {
                     buffer[bytes_read] = '\0';
-                    printf("Received message: %s\n", buffer);
+                    printf("Received message from player %d: %s\n", i, buffer);
 
-                    // Broadcast message to all other clients
+                    // Broadcast to other clients
                     for (int j = 0; j < MAX_CLIENTS; j++)
                     {
                         if (client_sockets[j] > 0 && client_sockets[j] != sd)
@@ -131,10 +128,10 @@ int start_server()
             }
         }
     }
-
     return 0;
 }
 
+// Stop the server and close all client connections
 void stop_server()
 {
     close(server_socket);
@@ -147,10 +144,25 @@ void stop_server()
     }
 }
 
-// Client Functions
+char message_buffer[BUFFER_SIZE]; // Buffer to store received message
 
-// Thread function to receive messages
-void *receive_messages(void *arg)
+char* receive_message()
+{
+    int bytes_read = read(sock, message_buffer, BUFFER_SIZE - 1);
+    if (bytes_read > 0)
+    {
+        message_buffer[bytes_read] = '\0';
+        printf("Received broadcast: %s\n", message_buffer);
+    }
+    else
+    {
+        printf("Error or no message received\n");
+    }
+    return message_buffer;
+}
+
+// Thread function to handle server messages for the client
+void *handle_server_messages(void *arg)
 {
     char buffer[BUFFER_SIZE];
     int bytes_read;
@@ -158,15 +170,25 @@ void *receive_messages(void *arg)
     while (running && (bytes_read = read(sock, buffer, sizeof(buffer) - 1)) > 0)
     {
         buffer[bytes_read] = '\0';
-        printf("Message from server: %s\n", buffer);
+
+        // Check for player ID message
+        if (strncmp(buffer, "PLAYER_ID|", 10) == 0)
+        {
+            playerId = atoi(buffer + 10);
+            printf("Assigned Player ID: %d\n", playerId);
+        }
+        else
+        {
+            printf("Message from server: %s\n", buffer);
+        }
     }
     return NULL;
 }
 
+// Start the client and connect to the server
 int start_client(const char *server_ip)
 {
     struct sockaddr_in server_addr;
-
     sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0)
     {
@@ -190,15 +212,20 @@ int start_client(const char *server_ip)
     }
 
     running = 1;
-    pthread_create(&recv_thread, NULL, receive_messages, NULL);
+    pthread_create(&recv_thread, NULL, handle_server_messages, NULL);
     return 0;
 }
 
+// Send a message from the client to the server
 void send_message(const char *message)
 {
-    send(sock, message, strlen(message), 0);
+    if (message && sock > 0)
+    {
+        send(sock, message, strlen(message), 0);
+    }
 }
 
+// Stop the client and terminate the message handling thread
 void stop_client()
 {
     running = 0;
